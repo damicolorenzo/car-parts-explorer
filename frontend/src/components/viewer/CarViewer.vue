@@ -27,6 +27,14 @@ const pointer = new THREE.Vector2()
 const selectableParts: THREE.Object3D[] = []
 let selectedMesh: THREE.Mesh | null = null
 
+const componentNames: Record<string, string> = {
+  bonnet_ok1: 'Hood',
+  door_lf_ok1: 'Front Left Door',
+  bump_fro01_1: 'Front Bumper',
+  bump_rea01_1: 'Rear Bumper',
+  windscre01_1: 'Windshield',
+}
+
 function createPart(
   name: string,
   geometry: THREE.BufferGeometry,
@@ -120,24 +128,28 @@ function onPointerClick(event: MouseEvent) {
 
   // Restore previously selected mesh
   if (selectedMesh) {
-    const original = originalMaterials.get(selectedMesh)
+  const original = originalMaterials.get(selectedMesh)
 
-    if (original) {
-      const highlightMaterial = selectedMesh.material
-      selectedMesh.material = original
+  if (original) {
+    const highlighted = selectedMesh.material
 
-      const materials = Array.isArray(highlightMaterial)
-        ? highlightMaterial
-        : [highlightMaterial]
+    selectedMesh.material = original
 
-      materials.forEach(material => {
-        if (material !== original &&
-            !Array.isArray(original)) {
-          material.dispose()
-        }
-      })
-    }
+    const highlightedArray = Array.isArray(highlighted)
+      ? highlighted
+      : [highlighted]
+
+    const originalArray = Array.isArray(original)
+      ? original
+      : [original]
+
+    highlightedArray.forEach(material => {
+      if (!originalArray.includes(material)) {
+        material.dispose()
+      }
+    })
   }
+}
 
   selectedMesh = null
   selectedPart.value = null
@@ -166,8 +178,21 @@ function onPointerClick(event: MouseEvent) {
     : highlight(originals)
 
   selectedMesh = mesh
-  selectedPart.value =
-    mesh.parent?.name || mesh.name
+  const hierarchy: string[] = []
+
+  let current: THREE.Object3D | null = mesh
+
+  while (current) {
+    hierarchy.unshift(
+      `${current.name || '(unnamed)'} [${current.type}]`
+    )
+    current = current.parent
+  }
+
+  console.log('Selected mesh:', mesh.name)
+  console.log('Mesh hierarchy:', hierarchy.join(' → '))
+
+  selectedPart.value = getComponentName(mesh)
 }
 
 
@@ -317,6 +342,42 @@ async function loadCarModel() {
     console.error('Failed to load Golf 7:', error)
   }
 }
+
+
+function getComponentName(mesh: THREE.Mesh): string {
+  let current: THREE.Object3D | null = mesh
+
+  while (current && current !== carModel) {
+    const name = current.name
+
+    // Look for a known automotive component
+    if (name && componentNames[name]) {
+      return componentNames[name]
+    }
+
+    current = current.parent
+  }
+
+  // Fallback: show the first meaningful object name
+  current = mesh
+
+  while (current && current !== carModel) {
+    const name = current.name
+
+    if (
+      name &&
+      !/^Mesh\d+$/i.test(name) &&
+      !/^Object_\d+$/i.test(name)
+    ) {
+      return name
+    }
+
+    current = current.parent
+  }
+
+  return mesh.name || 'Unknown component'
+}
+
 
 </script>
 
