@@ -4,6 +4,8 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { golf7Components } from '../../data/vehicles/golf7.components'
+import { resolveComponent } from '../../utils/componentResolver'
 
 const container = ref<HTMLDivElement | null>(null)
 const selectedPart = ref<string | null>(null)
@@ -27,142 +29,42 @@ const pointer = new THREE.Vector2()
 const selectableParts: THREE.Object3D[] = []
 let selectedMesh: THREE.Mesh | null = null
 
-const componentNames: Record<string, string> = {
-  bonnet_ok1: 'Hood',
-  door_lf_ok1: 'Front Left Door',
-  bump_fro01_1: 'Front Bumper',
-  bump_rea01_1: 'Rear Bumper',
-  windscre01_1: 'Windshield',
-}
+let isDisposed = false
 
-function createPart(
-  name: string,
-  geometry: THREE.BufferGeometry,
-  material: THREE.Material,
-  position: [number, number, number],
-  rotation?: [number, number, number]
-) {
-  const mesh = new THREE.Mesh(geometry, material)
-  mesh.name = name
-  mesh.position.set(...position)
-
-  if (rotation) mesh.rotation.set(...rotation)
-
-  mesh.castShadow = true
-  mesh.receiveShadow = true
-
-  scene.add(mesh)
-  selectableParts.push(mesh)
-  return mesh
-}
-
-function createDemoCar() {
-  const bodyMaterial = new THREE.MeshStandardMaterial({
-    color: 0x2563eb,
-    metalness: 0.5,
-    roughness: 0.3
-  })
-
-  const glassMaterial = new THREE.MeshStandardMaterial({
-    color: 0x93c5fd,
-    metalness: 0.2,
-    roughness: 0.15
-  })
-
-  const tireMaterial = new THREE.MeshStandardMaterial({
-    color: 0x171717,
-    roughness: 0.9
-  })
-
-  createPart(
-    'Car Body',
-    new THREE.BoxGeometry(4, 0.7, 1.8),
-    bodyMaterial,
-    [0, 0.9, 0]
-  )
-
-  createPart(
-    'Cabin',
-    new THREE.BoxGeometry(2, 0.75, 1.5),
-    glassMaterial,
-    [-0.25, 1.6, 0]
-  )
-
-  const wheelPositions: [string, number, number, number][] = [
-    ['Front Left Wheel', 1.25, 0.45, 0.95],
-    ['Front Right Wheel', 1.25, 0.45, -0.95],
-    ['Rear Left Wheel', -1.25, 0.45, 0.95],
-    ['Rear Right Wheel', -1.25, 0.45, -0.95]
-  ]
-
-  for (const [name, x, y, z] of wheelPositions) {
-    createPart(
-      name,
-      new THREE.CylinderGeometry(0.45, 0.45, 0.25, 32),
-      tireMaterial,
-      [x, y, z],
-      [Math.PI / 2, 0, 0]
-    )
-  }
-}
-
-
-function onPointerClick(event: MouseEvent) {
-  if (!container.value) return
-
-  const bounds =
-    renderer.domElement.getBoundingClientRect()
-
-  pointer.x =
-    ((event.clientX - bounds.left) / bounds.width) * 2 - 1
-
-  pointer.y =
-    -((event.clientY - bounds.top) / bounds.height) * 2 + 1
-
-  raycaster.setFromCamera(pointer, camera)
-
-  const intersections = raycaster.intersectObjects(
-    selectableParts,
-    false
-  )
-
-  // Restore previously selected mesh
+function clearSelection() {
   if (selectedMesh) {
-  const original = originalMaterials.get(selectedMesh)
+    const original = originalMaterials.get(selectedMesh)
 
-  if (original) {
-    const highlighted = selectedMesh.material
+    if (original) {
+      const highlighted = selectedMesh.material
 
-    selectedMesh.material = original
+      selectedMesh.material = original
 
-    const highlightedArray = Array.isArray(highlighted)
-      ? highlighted
-      : [highlighted]
+      const highlightedArray = Array.isArray(highlighted)
+        ? highlighted
+        : [highlighted]
 
-    const originalArray = Array.isArray(original)
-      ? original
-      : [original]
+      const originalArray = Array.isArray(original)
+        ? original
+        : [original]
 
-    highlightedArray.forEach(material => {
-      if (!originalArray.includes(material)) {
-        material.dispose()
-      }
-    })
+      highlightedArray.forEach(material => {
+        if (!originalArray.includes(material)) {
+          material.dispose()
+        }
+      })
+    }
   }
-}
 
   selectedMesh = null
   selectedPart.value = null
+}
 
-  if (intersections.length === 0) return
+function highlightMesh(mesh: THREE.Mesh) {
+  const original = originalMaterials.get(mesh)
+  if (!original) return
 
-  const mesh = intersections[0].object as THREE.Mesh
-
-  // Clone materials so only this mesh is highlighted
-  const originals = originalMaterials.get(mesh)
-  if (!originals) return
-
-  const highlight = (material: THREE.Material) => {
+  const highlightMaterial = (material: THREE.Material) => {
     const clone = material.clone()
 
     if (clone instanceof THREE.MeshStandardMaterial) {
@@ -173,30 +75,88 @@ function onPointerClick(event: MouseEvent) {
     return clone
   }
 
-  mesh.material = Array.isArray(originals)
-    ? originals.map(highlight)
-    : highlight(originals)
+  mesh.material = Array.isArray(original)
+    ? original.map(highlightMaterial)
+    : highlightMaterial(original)
 
   selectedMesh = mesh
-  const hierarchy: string[] = []
-
-  let current: THREE.Object3D | null = mesh
-
-  while (current) {
-    hierarchy.unshift(
-      `${current.name || '(unnamed)'} [${current.type}]`
-    )
-    current = current.parent
-  }
-
-  console.log('Selected mesh:', mesh.name)
-  console.log('Mesh hierarchy:', hierarchy.join(' → '))
-
-  selectedPart.value = getComponentName(mesh)
 }
 
 
+
+function onPointerClick(event: MouseEvent) {
+  if (!container.value || !carModel) return
+
+  const bounds = renderer.domElement.getBoundingClientRect()
+
+  pointer.x =
+    ((event.clientX - bounds.left) / bounds.width) * 2 - 1
+
+  pointer.y =
+    -((event.clientY - bounds.top) / bounds.height) * 2 + 1
+
+  raycaster.setFromCamera(pointer, camera)
+
+  const intersections = raycaster.intersectObjects(
+  selectableParts,
+  false
+)
+
+// Restore the previous selection
+clearSelection()
+
+if (intersections.length === 0) return
+
+  const mesh = intersections[0].object as THREE.Mesh
+
+  highlightMesh(mesh)
+
+  const component = resolveComponent(
+    mesh,
+    carModel,
+    golf7Components
+  )
+
+  selectedPart.value =
+    component?.name ?? getComponentName(mesh)
+}
+
+
+function disposeModel(root: THREE.Object3D) {
+  const geometries = new Set<THREE.BufferGeometry>()
+  const materials = new Set<THREE.Material>()
+  const textures = new Set<THREE.Texture>()
+
+  root.traverse(object => {
+    if (!(object instanceof THREE.Mesh)) return
+
+    geometries.add(object.geometry)
+
+    const meshMaterials = Array.isArray(object.material)
+      ? object.material
+      : [object.material]
+
+    meshMaterials.forEach(material => {
+      materials.add(material)
+
+      Object.values(material).forEach(value => {
+        if (value instanceof THREE.Texture) {
+          textures.add(value)
+        }
+      })
+    })
+  })
+
+  geometries.forEach(geometry => geometry.dispose())
+  materials.forEach(material => material.dispose())
+  textures.forEach(texture => texture.dispose())
+}
+
+
+
 onMounted(() => {
+  isDisposed = false
+
   if (!container.value) return
 
   const width = container.value.clientWidth
@@ -255,23 +215,48 @@ onMounted(() => {
   animate()
 })
 
+
+
 onBeforeUnmount(() => {
+  isDisposed = true
+
   cancelAnimationFrame(animationId)
   resizeObserver?.disconnect()
-  renderer?.domElement.removeEventListener('click', onPointerClick)
+
+  renderer?.domElement.removeEventListener(
+    'click',
+    onPointerClick
+  )
+
   controls?.dispose()
-  scene?.traverse(object => {
-    if (object instanceof THREE.Mesh) {
-      object.geometry.dispose()
-      const materials = Array.isArray(object.material)
-        ? object.material
-        : [object.material]
-      materials.forEach(material => material.dispose())
-    }
-  })
+
+  clearSelection()
+
+  if (scene) {
+    disposeModel(scene)
+
+    scene.traverse(object => {
+      if (object instanceof THREE.GridHelper) {
+        object.geometry.dispose()
+
+        const materials = Array.isArray(object.material)
+          ? object.material
+          : [object.material]
+
+        materials.forEach(material => material.dispose())
+      }
+    })
+  }
+
+  originalMaterials.clear()
+  selectableParts.length = 0
+  carModel = null
+
   renderer?.dispose()
   renderer?.domElement.remove()
 })
+
+
 
 
 async function loadCarModel() {
@@ -281,6 +266,11 @@ async function loadCarModel() {
     const gltf = await loader.loadAsync(
       '/models/golf7/exterior.glb'
     )
+
+    if (isDisposed) {
+  disposeModel(gltf.scene)
+  return
+}
 
     carModel = gltf.scene
 
@@ -346,20 +336,6 @@ async function loadCarModel() {
 
 function getComponentName(mesh: THREE.Mesh): string {
   let current: THREE.Object3D | null = mesh
-
-  while (current && current !== carModel) {
-    const name = current.name
-
-    // Look for a known automotive component
-    if (name && componentNames[name]) {
-      return componentNames[name]
-    }
-
-    current = current.parent
-  }
-
-  // Fallback: show the first meaningful object name
-  current = mesh
 
   while (current && current !== carModel) {
     const name = current.name
