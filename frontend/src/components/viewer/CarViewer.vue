@@ -1,13 +1,21 @@
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
-import { golf7Components } from '../../data/vehicles/golf7.components'
 import { resolveComponent } from '../../utils/componentResolver'
 import ComponentList from '../explorer/ComponentList.vue'
 import type { AutomotiveComponent } from '../../types/automotive'
+import type { ViewerModelConfig } from '../../types/viewer'
+import { createBrakeAssembly } from '../../models/procedural/brakeAssembly'
+import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
+import { createComponentLabel } from '../../utils/componentLabels'
+import ComponentInfoPanel from '../explorer/ComponentInfoPanel.vue'
+
+const props = defineProps<{
+  model: ViewerModelConfig
+}>()
 
 const container = ref<HTMLDivElement | null>(null)
 const selectedPart = ref<string | null>(null)
@@ -38,7 +46,33 @@ const isolatedComponentId = ref<string | null>(null)
 const focusTarget = new THREE.Vector3()
 const focusCameraPosition = new THREE.Vector3()
 
+const explosionAmount = ref(0)
+
+const originalPositions = new Map<
+  THREE.Object3D,
+  THREE.Vector3
+>()
+
+const explosionDirections = new Map<
+  THREE.Object3D,
+  THREE.Vector3
+>()
+
+
 let isCameraAnimating = false
+
+let labelRenderer: CSS2DRenderer
+const componentLabels = new Map<string, THREE.Object3D>()
+const showLabels = ref(props.model.showLabelsByDefault ?? false)
+
+
+
+const selectedComponent = computed(() =>
+  props.model.components.find(
+    component => component.id === selectedComponentId.value
+  ) ?? null
+)
+
 
 function clearSelection() {
   for (const mesh of selectedMeshes) {
@@ -108,31 +142,31 @@ function onPointerClick(event: MouseEvent) {
   raycaster.setFromCamera(pointer, camera)
 
   
-const intersections = raycaster.intersectObjects(
-  selectableParts,
-  false
-)
+  const intersections = raycaster.intersectObjects(
+    selectableParts,
+    false
+  )
 
-if (intersections.length === 0) {
-  clearSelection()
-  return
-}
+  if (intersections.length === 0) {
+    clearSelection()
+    return
+  }
 
-const mesh = intersections[0].object as THREE.Mesh
+  const mesh = intersections[0].object as THREE.Mesh
 
-const component = resolveComponent(
-  mesh,
-  carModel,
-  golf7Components
-)
+  const component = resolveComponent(
+    mesh,
+    carModel,
+    props.model.components
+  )
 
-if (component) {
-  selectComponent(component)
-} else {
-  clearSelection()
-  highlightMesh(mesh)
-  selectedPart.value = getComponentName(mesh)
-}
+  if (component) {
+    selectComponent(component)
+  } else {
+    clearSelection()
+    highlightMesh(mesh)
+    selectedPart.value = getComponentName(mesh)
+  }
 
 }
 
@@ -188,8 +222,19 @@ onMounted(() => {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.shadowMap.enabled = true
 
-  container.value.appendChild(renderer.domElement)
+  
+  labelRenderer = new CSS2DRenderer()
+  labelRenderer.setSize(width, height)
 
+  labelRenderer.domElement.style.position = 'absolute'
+  labelRenderer.domElement.style.top = '0'
+  labelRenderer.domElement.style.left = '0'
+  labelRenderer.domElement.style.zIndex = '1'
+  labelRenderer.domElement.style.pointerEvents = 'none'
+
+  container.value.appendChild(renderer.domElement)
+  container.value.appendChild(labelRenderer.domElement)
+  
   controls = new OrbitControls(camera, renderer.domElement)
   controls.addEventListener('start', stopCameraAnimation)
   controls.enableDamping = true
@@ -219,6 +264,7 @@ onMounted(() => {
     camera.aspect = w / h
     camera.updateProjectionMatrix()
     renderer.setSize(w, h)
+    labelRenderer.setSize(w, h)
   })
   resizeObserver.observe(container.value)
 
@@ -246,8 +292,10 @@ function animate() {
     }
   }
 
+  updateExplodedView()
   controls.update()
   renderer.render(scene, camera)
+  labelRenderer.render(scene, camera)
 }
 
 
@@ -293,9 +341,13 @@ controls?.removeEventListener('start', stopCameraAnimation)
   originalMaterials.clear()
   selectableParts.length = 0
   carModel = null
+  originalPositions.clear()
+explosionDirections.clear()
 
   renderer?.dispose()
   renderer?.domElement.remove()
+  componentLabels.clear()
+  labelRenderer?.domElement.remove()
 })
 
 
@@ -305,16 +357,26 @@ async function loadCarModel() {
   const loader = new GLTFLoader()
 
   try {
-    const gltf = await loader.loadAsync(
-      '/models/golf7/exterior.glb'
-    )
+    
+    let model: THREE.Group
+
+    if (props.model.modelType === 'procedural') {
+      model = createBrakeAssembly()
+    } else {
+      if (!props.model.modelPath) {
+        throw new Error('GLTF model path is missing')
+      }
+
+      const gltf = await loader.loadAsync(props.model.modelPath)
+      model = gltf.scene
+    }
 
     if (isDisposed) {
-  disposeModel(gltf.scene)
-  return
-}
+      disposeModel(model)
+      return
+    }
 
-    carModel = gltf.scene
+    carModel = model
 
     // Register selectable meshes
     carModel.traverse((object) => {
@@ -334,6 +396,9 @@ async function loadCarModel() {
     const center = box.getCenter(new THREE.Vector3())
 
     carModel.position.sub(center)
+
+    initializeComponentLabels()
+    initializeExplodedView()
 
     // Calculate bounds after centering
     const bounds = new THREE.Box3().setFromObject(carModel)
@@ -363,7 +428,7 @@ async function loadCarModel() {
     controls.target.set(0, 0, 0)
     controls.update()
 
-    console.log('Golf 7 loaded successfully!')
+    console.log(`${props.model.name} loaded successfully!`)
 
     // Inspect hierarchy
     carModel.traverse((object) => {
@@ -371,7 +436,7 @@ async function loadCarModel() {
     })
 
   } catch (error) {
-    console.error('Failed to load Golf 7:', error)
+    console.error(`Failed to load ${props.model.name}:`, error)
   }
 }
 
@@ -420,10 +485,10 @@ function findComponentMeshes(
     if (!(object instanceof THREE.Mesh)) return
 
     const resolved = resolveComponent(
-      object,
-      carModel!,
-      golf7Components
-    )
+  object,
+  carModel!,
+  props.model.components
+)
 
     if (resolved?.id === component.id) {
       matches.push(object)
@@ -499,7 +564,7 @@ function applyComponentVisibility() {
     const component = resolveComponent(
       object,
       carModel!,
-      golf7Components
+      props.model.components
     )
 
     if (isolatedComponentId.value !== null) {
@@ -514,6 +579,7 @@ function applyComponentVisibility() {
         !hiddenComponentIds.value.includes(component.id)
     }
   })
+  updateComponentLabels()
 }
 
 function isolateComponent(component: AutomotiveComponent) {
@@ -537,9 +603,9 @@ function exitIsolation() {
 }
 
 function isolateSelectedComponent() {
-  const component = golf7Components.find(
-    c => c.id === selectedComponentId.value
-  )
+  const component = props.model.components.find(
+  c => c.id === selectedComponentId.value
+)
 
   if (component) {
     isolateComponent(component)
@@ -607,14 +673,112 @@ function focusOnComponent(component: AutomotiveComponent) {
 }
 
 function focusSelectedComponent() {
-  const component = golf7Components.find(
-    c => c.id === selectedComponentId.value
-  )
+  const component = props.model.components.find(
+  c => c.id === selectedComponentId.value
+)
 
   if (component) {
     focusOnComponent(component)
   }
 }
+
+
+function initializeExplodedView() {
+  originalPositions.clear()
+  explosionDirections.clear()
+  explosionAmount.value = 0
+
+  if (!carModel || !props.model.explodedView) return
+
+  for (const part of props.model.explodedView.parts) {
+    const object = carModel.getObjectByName(part.meshName)
+
+    if (!object) {
+      console.warn(`Exploded-view object not found: ${part.meshName}`)
+      continue
+    }
+
+    originalPositions.set(object, object.position.clone())
+
+    const direction = new THREE.Vector3(...part.direction)
+      .normalize()
+      .multiplyScalar(part.distance)
+
+    explosionDirections.set(object, direction)
+  }
+}
+
+
+
+const explosionTarget = new THREE.Vector3()
+
+function updateExplodedView() {
+  for (const [object, originalPosition] of originalPositions) {
+    const direction = explosionDirections.get(object)
+    if (!direction) continue
+
+    explosionTarget
+      .copy(originalPosition)
+      .addScaledVector(direction, explosionAmount.value)
+
+    object.position.lerp(explosionTarget, 0.1)
+  }
+}
+
+
+
+function initializeComponentLabels() {
+  if (!carModel) return
+
+  componentLabels.clear()
+
+  for (const component of props.model.components) {
+    const meshes = findComponentMeshes(component)
+    if (meshes.length === 0) continue
+
+    const anchorMesh = meshes[0]!
+
+    // Calculate a bounding box in world coordinates.
+    const bounds = new THREE.Box3().setFromObject(anchorMesh)
+    const center = bounds.getCenter(new THREE.Vector3())
+    const size = bounds.getSize(new THREE.Vector3())
+
+    // Place label slightly above the component.
+    center.y += Math.max(size.y * 0.6, 0.15)
+
+    // Convert the position to the mesh's local coordinates.
+    const localPosition = anchorMesh.worldToLocal(center)
+
+    const label = createComponentLabel(component)
+    label.position.copy(localPosition)
+    label.visible = showLabels.value
+
+    anchorMesh.add(label)
+    componentLabels.set(component.id, label)
+  }
+}
+
+
+
+function updateComponentLabels() {
+  for (const component of props.model.components) {
+    const label = componentLabels.get(component.id)
+    if (!label) continue
+
+    const meshes = findComponentMeshes(component)
+
+    const hasVisibleMesh = meshes.some(mesh => mesh.visible)
+
+    label.visible = showLabels.value && hasVisibleMesh
+  }
+}
+
+
+function toggleLabels() {
+  showLabels.value = !showLabels.value
+  updateComponentLabels()
+}
+
 
 </script>
 
@@ -624,6 +788,11 @@ function focusSelectedComponent() {
 
     <div class="part-panel">
       <h2>Car Parts Explorer</h2>
+      <div class="label-controls">
+  <button @click="toggleLabels">
+    {{ showLabels ? 'Hide Labels' : 'Show Labels' }}
+  </button>
+</div>
       <p>Click on a component to inspect it.</p>
 
       <div v-if="selectedPart" class="selected">
@@ -634,12 +803,14 @@ function focusSelectedComponent() {
       <h3>Components</h3>
 
 <ComponentList
-  :components="golf7Components"
+  :components="props.model.components"
   :selected-id="selectedComponentId"
   :hidden-ids="hiddenComponentIds"
   @select="selectFromList"
   @toggle-visibility="toggleComponentVisibility"
 />
+
+<ComponentInfoPanel :component="selectedComponent" />
 
 <div class="isolation-controls">
   <button
@@ -663,7 +834,31 @@ function focusSelectedComponent() {
 >
   Focus on Component
 </button>
-</div>    </div>
+</div>    
+
+<div
+  v-if="props.model.explodedView"
+  class="explosion-controls"
+>
+  <label for="explosion-slider">
+    Exploded View: {{ Math.round(explosionAmount * 100) }}%
+  </label>
+
+  <input
+    id="explosion-slider"
+    v-model.number="explosionAmount"
+    type="range"
+    min="0"
+    max="1"
+    step="0.01"
+  />
+
+  <button @click="explosionAmount = 0">
+    Reset Assembly
+  </button>
+
+</div>
+</div>
   </div>
 </template>
 
@@ -671,7 +866,8 @@ function focusSelectedComponent() {
 .viewer {
   display: flex;
   width: 100%;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
   background: #101827;
   color: white;
 }
@@ -687,6 +883,7 @@ function focusSelectedComponent() {
   padding: 24px;
   background: #1e293b;
   box-sizing: border-box;
+  overflow-y: auto;
 }
 
 .selected {
@@ -744,4 +941,54 @@ function focusSelectedComponent() {
 .focus-button:hover {
   background: #0f766e;
 }
+
+.explosion-controls {
+  margin-top: 20px;
+  padding: 16px;
+  border-radius: 8px;
+  background: #334155;
+}
+
+.explosion-controls label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.explosion-controls input {
+  width: 100%;
+  cursor: pointer;
+}
+
+.explosion-controls button {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #64748b;
+  border-radius: 6px;
+  background: #1e293b;
+  color: white;
+  cursor: pointer;
+}
+
+
+.label-controls {
+  margin: 16px 0;
+}
+
+.label-controls button {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  background: #334155;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.label-controls button:hover {
+  background: #475569;
+}
+
 </style>
