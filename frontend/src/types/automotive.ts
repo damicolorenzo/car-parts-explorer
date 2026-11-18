@@ -1,9 +1,3 @@
-export interface AutomotiveComponent {
-  id: string
-  name: string
-  category: 'body' | 'glass' | 'lighting' | 'wheels' | 'brakes' | 'other'
-  meshNames: string[]
-}
 
 export interface ComponentTechnicalInfo {
   description: string
@@ -23,6 +17,7 @@ export interface AutomotiveComponent {
     | 'lighting'
     | 'wheels'
     | 'brakes'
+    | 'suspension'
     | 'other'
   meshNames: string[]
   technicalInfo?: ComponentTechnicalInfo

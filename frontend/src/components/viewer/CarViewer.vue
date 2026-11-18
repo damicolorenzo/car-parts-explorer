@@ -2,16 +2,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import * as THREE from 'three'
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
-import { resolveComponent } from '../../utils/componentResolver'
 import ComponentList from '../explorer/ComponentList.vue'
 import type { AutomotiveComponent } from '../../types/automotive'
 import type { ViewerModelConfig } from '../../types/viewer'
-import { createBrakeAssembly } from '../../models/procedural/brakeAssembly'
-import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
 import { createComponentLabel } from '../../utils/componentLabels'
 import ComponentInfoPanel from '../explorer/ComponentInfoPanel.vue'
+import { ThreeEngine } from '../../engine/ThreeEngine'
+import type { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { ModelManager } from '../../engine/ModelManager'
+import { ComponentController } from '../../engine/ComponentController'
 
 const props = defineProps<{
   model: ViewerModelConfig
@@ -20,24 +19,17 @@ const props = defineProps<{
 const container = ref<HTMLDivElement | null>(null)
 const selectedPart = ref<string | null>(null)
 
+let engine: ThreeEngine
+
 let renderer: THREE.WebGLRenderer
 let scene: THREE.Scene
 let camera: THREE.PerspectiveCamera
 let controls: OrbitControls
-let animationId = 0
-let resizeObserver: ResizeObserver
 
 let carModel: THREE.Group | null = null
 
-const originalMaterials = new Map<
-  THREE.Mesh,
-  THREE.Material | THREE.Material[]
->()
-
 const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
-const selectableParts: THREE.Object3D[] = []
-const selectedMeshes: THREE.Mesh[] = []
 
 let isDisposed = false
 const selectedComponentId = ref<string | null>(null)
@@ -58,14 +50,10 @@ const explosionDirections = new Map<
   THREE.Vector3
 >()
 
-
 let isCameraAnimating = false
 
-let labelRenderer: CSS2DRenderer
 const componentLabels = new Map<string, THREE.Object3D>()
 const showLabels = ref(props.model.showLabelsByDefault ?? false)
-
-
 
 const selectedComponent = computed(() =>
   props.model.components.find(
@@ -73,60 +61,15 @@ const selectedComponent = computed(() =>
   ) ?? null
 )
 
+const modelManager = new ModelManager()
+
+let componentController: ComponentController | null = null
 
 function clearSelection() {
-  for (const mesh of selectedMeshes) {
-    const original = originalMaterials.get(mesh)
-    if (!original) continue
-
-    const highlighted = Array.isArray(mesh.material)
-      ? mesh.material
-      : [mesh.material]
-
-    mesh.material = original
-
-    const originalArray = Array.isArray(original)
-      ? original
-      : [original]
-
-    highlighted.forEach(material => {
-      if (!originalArray.includes(material)) {
-        material.dispose()
-      }
-    })
-  }
-
-  selectedMeshes.length = 0
-  selectedPart.value = null
+  componentController?.clearSelection()
   selectedComponentId.value = null
+  selectedPart.value = null
 }
-
-
-
-function highlightMesh(mesh: THREE.Mesh) {
-  const original = originalMaterials.get(mesh)
-  if (!original) return
-
-  const createHighlight = (material: THREE.Material) => {
-    const clone = material.clone()
-
-    if (clone instanceof THREE.MeshStandardMaterial) {
-      clone.emissive.setHex(0x3366ff)
-      clone.emissiveIntensity = 0.6
-    }
-
-    return clone
-  }
-
-  mesh.material = Array.isArray(original)
-    ? original.map(createHighlight)
-    : createHighlight(original)
-
-  selectedMeshes.push(mesh)
-}
-
-
-
 
 function onPointerClick(event: MouseEvent) {
   if (!container.value || !carModel) return
@@ -143,303 +86,143 @@ function onPointerClick(event: MouseEvent) {
 
   
   const intersections = raycaster.intersectObjects(
-    selectableParts,
-    false
-  )
+  componentController?.getSelectableMeshes() ?? [],
+  false
+)
 
-  if (intersections.length === 0) {
-    clearSelection()
-    return
-  }
-
-  const mesh = intersections[0].object as THREE.Mesh
-
-  const component = resolveComponent(
-    mesh,
-    carModel,
-    props.model.components
-  )
-
-  if (component) {
-    selectComponent(component)
-  } else {
-    clearSelection()
-    highlightMesh(mesh)
-    selectedPart.value = getComponentName(mesh)
-  }
-
+if (intersections.length === 0) {
+  clearSelection()
+  return
 }
 
+const mesh = intersections[0].object as THREE.Mesh
+const component = componentController?.selectMesh(mesh) ?? null
 
-function disposeModel(root: THREE.Object3D) {
-  const geometries = new Set<THREE.BufferGeometry>()
-  const materials = new Set<THREE.Material>()
-  const textures = new Set<THREE.Texture>()
+selectedComponentId.value = component?.id ?? null
+selectedPart.value = component?.name ?? getComponentName(mesh)
 
-  root.traverse(object => {
-    if (!(object instanceof THREE.Mesh)) return
-
-    geometries.add(object.geometry)
-
-    const meshMaterials = Array.isArray(object.material)
-      ? object.material
-      : [object.material]
-
-    meshMaterials.forEach(material => {
-      materials.add(material)
-
-      Object.values(material).forEach(value => {
-        if (value instanceof THREE.Texture) {
-          textures.add(value)
-        }
-      })
-    })
-  })
-
-  geometries.forEach(geometry => geometry.dispose())
-  materials.forEach(material => material.dispose())
-  textures.forEach(texture => texture.dispose())
 }
-
-
 
 onMounted(() => {
   isDisposed = false
 
   if (!container.value) return
 
-  const width = container.value.clientWidth
-  const height = container.value.clientHeight
+  engine = new ThreeEngine(container.value)
 
-  scene = new THREE.Scene()
-  scene.background = new THREE.Color(0x101827)
+  renderer = engine.renderer
+  scene = engine.scene
+  camera = engine.camera
+  controls = engine.controls
 
-  camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000)
-  camera.position.set(6, 4, 6)
-
-  renderer = new THREE.WebGLRenderer({ antialias: true })
-  renderer.setSize(width, height)
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
-  renderer.shadowMap.enabled = true
-
-  
-  labelRenderer = new CSS2DRenderer()
-  labelRenderer.setSize(width, height)
-
-  labelRenderer.domElement.style.position = 'absolute'
-  labelRenderer.domElement.style.top = '0'
-  labelRenderer.domElement.style.left = '0'
-  labelRenderer.domElement.style.zIndex = '1'
-  labelRenderer.domElement.style.pointerEvents = 'none'
-
-  container.value.appendChild(renderer.domElement)
-  container.value.appendChild(labelRenderer.domElement)
-  
-  controls = new OrbitControls(camera, renderer.domElement)
   controls.addEventListener('start', stopCameraAnimation)
-  controls.enableDamping = true
-  controls.target.set(0, 1, 0)
-  controls.update()
 
-  scene.add(new THREE.AmbientLight(0xffffff, 1.5))
-
-  const light = new THREE.DirectionalLight(0xffffff, 3)
-  light.position.set(5, 10, 5)
-  light.castShadow = true
-  scene.add(light)
-
-  const grid = new THREE.GridHelper(20, 20, 0x475569, 0x334155)
-  scene.add(grid)
+  renderer.domElement.addEventListener(
+    'click',
+    onPointerClick
+  )
 
   void loadCarModel()
 
-  renderer.domElement.addEventListener('click', onPointerClick)
+  engine.start(() => {
+    if (isCameraAnimating) {
+      const speed = 0.08
 
-  resizeObserver = new ResizeObserver(() => {
-    if (!container.value) return
-    const w = container.value.clientWidth
-    const h = container.value.clientHeight
-    if (!w || !h) return
+      camera.position.lerp(focusCameraPosition, speed)
+      controls.target.lerp(focusTarget, speed)
 
-    camera.aspect = w / h
-    camera.updateProjectionMatrix()
-    renderer.setSize(w, h)
-    labelRenderer.setSize(w, h)
-  })
-  resizeObserver.observe(container.value)
+      const cameraDone =
+        camera.position.distanceTo(focusCameraPosition) < 0.01
 
-  
-function animate() {
-  animationId = requestAnimationFrame(animate)
+      const targetDone =
+        controls.target.distanceTo(focusTarget) < 0.01
 
-  if (isCameraAnimating) {
-    const speed = 0.08
-
-    camera.position.lerp(focusCameraPosition, speed)
-    controls.target.lerp(focusTarget, speed)
-
-    const cameraDone =
-      camera.position.distanceTo(focusCameraPosition) < 0.01
-
-    const targetDone =
-      controls.target.distanceTo(focusTarget) < 0.01
-
-    if (cameraDone && targetDone) {
-      camera.position.copy(focusCameraPosition)
-      controls.target.copy(focusTarget)
-
-      isCameraAnimating = false
+      if (cameraDone && targetDone) {
+        camera.position.copy(focusCameraPosition)
+        controls.target.copy(focusTarget)
+        isCameraAnimating = false
+      }
     }
-  }
 
-  updateExplodedView()
-  controls.update()
-  renderer.render(scene, camera)
-  labelRenderer.render(scene, camera)
-}
-
-
-  animate()
+    updateExplodedView()
+  })
 })
 
 function stopCameraAnimation() {
   isCameraAnimating = false
 }
 
+
 onBeforeUnmount(() => {
   isDisposed = true
 
-  cancelAnimationFrame(animationId)
-  resizeObserver?.disconnect()
+  if (!engine) return
 
-  renderer?.domElement.removeEventListener(
+  renderer.domElement.removeEventListener(
     'click',
     onPointerClick
   )
 
-controls?.removeEventListener('start', stopCameraAnimation)
-  controls?.dispose()
+  controls.removeEventListener(
+    'start',
+    stopCameraAnimation
+  )
 
   clearSelection()
 
-  if (scene) {
-    disposeModel(scene)
+  if (carModel) {
+    scene.remove(carModel)
 
-    scene.traverse(object => {
-      if (object instanceof THREE.GridHelper) {
-        object.geometry.dispose()
+    componentController?.dispose()
+    componentController = null
 
-        const materials = Array.isArray(object.material)
-          ? object.material
-          : [object.material]
-
-        materials.forEach(material => material.dispose())
-      }
-    })
+    modelManager.dispose(carModel)
+    carModel = null
   }
 
-  originalMaterials.clear()
-  selectableParts.length = 0
-  carModel = null
   originalPositions.clear()
-explosionDirections.clear()
-
-  renderer?.dispose()
-  renderer?.domElement.remove()
+  explosionDirections.clear()
   componentLabels.clear()
-  labelRenderer?.domElement.remove()
+
+  engine.dispose()
 })
 
 
-
-
 async function loadCarModel() {
-  const loader = new GLTFLoader()
-
   try {
-    
-    let model: THREE.Group
-
-    if (props.model.modelType === 'procedural') {
-      model = createBrakeAssembly()
-    } else {
-      if (!props.model.modelPath) {
-        throw new Error('GLTF model path is missing')
-      }
-
-      const gltf = await loader.loadAsync(props.model.modelPath)
-      model = gltf.scene
-    }
+    const model = await modelManager.load(props.model)
 
     if (isDisposed) {
-      disposeModel(model)
+      modelManager.dispose(model)
       return
     }
 
     carModel = model
 
-    // Register selectable meshes
-    carModel.traverse((object) => {
-      if (!(object instanceof THREE.Mesh)) return
-
-      object.castShadow = true
-      object.receiveShadow = true
-
-      originalMaterials.set(object, object.material)
-      selectableParts.push(object)
-    })
+    // Register selectable meshes.
+    componentController = new ComponentController(
+      carModel,
+      props.model.components
+    )
 
     scene.add(carModel)
-
-    // Center the model
-    const box = new THREE.Box3().setFromObject(carModel)
-    const center = box.getCenter(new THREE.Vector3())
-
-    carModel.position.sub(center)
 
     initializeComponentLabels()
     initializeExplodedView()
 
-    // Calculate bounds after centering
-    const bounds = new THREE.Box3().setFromObject(carModel)
-    const size = bounds.getSize(new THREE.Vector3())
+    modelManager.frameModel(carModel, camera, controls)
 
-    const maxDimension = Math.max(
-      size.x, size.y, size.z
+    console.log(
+      `${props.model.name} loaded successfully!`
     )
-
-    // Position the camera
-    const distance =
-      maxDimension /
-      (2 * Math.tan(THREE.MathUtils.degToRad(
-        camera.fov / 2
-      ))) * 1.8
-
-    camera.position.set(
-      distance,
-      distance * 0.6,
-      distance
-    )
-
-    camera.near = Math.max(distance / 1000, 0.01)
-    camera.far = distance * 20
-    camera.updateProjectionMatrix()
-
-    controls.target.set(0, 0, 0)
-    controls.update()
-
-    console.log(`${props.model.name} loaded successfully!`)
-
-    // Inspect hierarchy
-    carModel.traverse((object) => {
-      console.log(object.name, object.type)
-    })
 
   } catch (error) {
-    console.error(`Failed to load ${props.model.name}:`, error)
+    console.error(
+      `Failed to load ${props.model.name}:`,
+      error
+    )
   }
 }
-
 
 function getComponentName(mesh: THREE.Mesh): string {
   let current: THREE.Object3D | null = mesh
@@ -477,44 +260,17 @@ function selectFromList(component: AutomotiveComponent) {
 function findComponentMeshes(
   component: AutomotiveComponent
 ): THREE.Mesh[] {
-  if (!carModel) return []
-
-  const matches: THREE.Mesh[] = []
-
-  carModel.traverse(object => {
-    if (!(object instanceof THREE.Mesh)) return
-
-    const resolved = resolveComponent(
-  object,
-  carModel!,
-  props.model.components
-)
-
-    if (resolved?.id === component.id) {
-      matches.push(object)
-    }
-  })
-
-  return matches
+  return componentController?.findMeshes(component) ?? []
 }
 
 
-
 function selectComponent(component: AutomotiveComponent) {
-  clearSelection()
+  if (!componentController) return
+
+  componentController.select(component)
 
   selectedComponentId.value = component.id
   selectedPart.value = component.name
-
-  const meshes = findComponentMeshes(component)
-
-  meshes.forEach(highlightMesh)
-
-  if (meshes.length === 0) {
-    console.warn(
-      `No meshes found for component: ${component.id}`
-    )
-  }
 }
 
 
@@ -523,17 +279,14 @@ function setComponentVisibility(
   component: AutomotiveComponent,
   visible: boolean
 ) {
+  componentController?.setVisibility(component, visible)
+
   if (visible) {
     hiddenComponentIds.value =
-      hiddenComponentIds.value.filter(
-        id => id !== component.id
-      )
+      hiddenComponentIds.value.filter(id => id !== component.id)
   } else {
     hiddenComponentIds.value = [
-      ...new Set([
-        ...hiddenComponentIds.value,
-        component.id
-      ])
+      ...new Set([...hiddenComponentIds.value, component.id])
     ]
 
     if (selectedComponentId.value === component.id) {
@@ -541,7 +294,7 @@ function setComponentVisibility(
     }
   }
 
-  applyComponentVisibility()
+  updateComponentLabels()
 }
 
 
@@ -554,52 +307,22 @@ function toggleComponentVisibility(
   setComponentVisibility(component, isHidden)
 }
 
+function isolateComponent(component: AutomotiveComponent) {
+  if (!componentController) return
 
-function applyComponentVisibility() {
-  if (!carModel) return
+  componentController.isolate(component)
 
-  carModel.traverse(object => {
-    if (!(object instanceof THREE.Mesh)) return
+  selectedComponentId.value = component.id
+  selectedPart.value = component.name
+  isolatedComponentId.value = component.id
 
-    const component = resolveComponent(
-      object,
-      carModel!,
-      props.model.components
-    )
-
-    if (isolatedComponentId.value !== null) {
-      // Hide everything except the isolated component,
-      // including unregistered meshes.
-      object.visible =
-        component?.id === isolatedComponentId.value
-    } else {
-      // Restore normal visibility preferences.
-      object.visible =
-        !component ||
-        !hiddenComponentIds.value.includes(component.id)
-    }
-  })
   updateComponentLabels()
 }
 
-function isolateComponent(component: AutomotiveComponent) {
-  // Ensure that the component exists in the model.
-  const meshes = findComponentMeshes(component)
-
-  if (meshes.length === 0) {
-    console.warn(`Cannot isolate ${component.name}: no meshes found`)
-    return
-  }
-
-  isolatedComponentId.value = component.id
-
-  selectComponent(component)
-  applyComponentVisibility()
-}
-
 function exitIsolation() {
+  componentController?.exitIsolation()
   isolatedComponentId.value = null
-  applyComponentVisibility()
+  updateComponentLabels()
 }
 
 function isolateSelectedComponent() {
