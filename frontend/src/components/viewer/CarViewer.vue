@@ -5,12 +5,14 @@ import * as THREE from 'three'
 import ComponentList from '../explorer/ComponentList.vue'
 import type { AutomotiveComponent } from '../../types/automotive'
 import type { ViewerModelConfig } from '../../types/viewer'
-import { createComponentLabel } from '../../utils/componentLabels'
 import ComponentInfoPanel from '../explorer/ComponentInfoPanel.vue'
 import { ThreeEngine } from '../../engine/ThreeEngine'
 import type { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { ModelManager } from '../../engine/ModelManager'
 import { ComponentController } from '../../engine/ComponentController'
+import { CameraController } from '../../engine/CameraController'
+import { ExplodedViewController } from '../../engine/ExplodedViewController'
+import { LabelController } from '../../engine/LabelController'
 
 const props = defineProps<{
   model: ViewerModelConfig
@@ -35,24 +37,9 @@ let isDisposed = false
 const selectedComponentId = ref<string | null>(null)
 const hiddenComponentIds = ref<string[]>([])
 const isolatedComponentId = ref<string | null>(null)
-const focusTarget = new THREE.Vector3()
-const focusCameraPosition = new THREE.Vector3()
 
 const explosionAmount = ref(0)
 
-const originalPositions = new Map<
-  THREE.Object3D,
-  THREE.Vector3
->()
-
-const explosionDirections = new Map<
-  THREE.Object3D,
-  THREE.Vector3
->()
-
-let isCameraAnimating = false
-
-const componentLabels = new Map<string, THREE.Object3D>()
 const showLabels = ref(props.model.showLabelsByDefault ?? false)
 
 const selectedComponent = computed(() =>
@@ -64,6 +51,12 @@ const selectedComponent = computed(() =>
 const modelManager = new ModelManager()
 
 let componentController: ComponentController | null = null
+
+let cameraController: CameraController | null = null
+
+let explodedViewController: ExplodedViewController | null = null
+
+let labelController: LabelController | null = null
 
 function clearSelection() {
   componentController?.clearSelection()
@@ -114,8 +107,9 @@ onMounted(() => {
   scene = engine.scene
   camera = engine.camera
   controls = engine.controls
+  cameraController = new CameraController(camera, controls)
 
-  controls.addEventListener('start', stopCameraAnimation)
+  controls.addEventListener('start', onControlsStart)
 
   renderer.domElement.addEventListener(
     'click',
@@ -125,31 +119,41 @@ onMounted(() => {
   void loadCarModel()
 
   engine.start(() => {
-    if (isCameraAnimating) {
-      const speed = 0.08
+  cameraController?.update()
 
-      camera.position.lerp(focusCameraPosition, speed)
-      controls.target.lerp(focusTarget, speed)
-
-      const cameraDone =
-        camera.position.distanceTo(focusCameraPosition) < 0.01
-
-      const targetDone =
-        controls.target.distanceTo(focusTarget) < 0.01
-
-      if (cameraDone && targetDone) {
-        camera.position.copy(focusCameraPosition)
-        controls.target.copy(focusTarget)
-        isCameraAnimating = false
-      }
-    }
-
-    updateExplodedView()
-  })
+  explodedViewController?.setAmount(explosionAmount.value)
+  explodedViewController?.update()
+})
 })
 
-function stopCameraAnimation() {
-  isCameraAnimating = false
+function onControlsStart() {
+  cameraController?.stop()
+}
+
+
+function disposeLoadedModel(): void {
+  clearSelection()
+
+  explodedViewController?.dispose()
+  explodedViewController = null
+
+  labelController?.dispose()
+  labelController = null
+
+  componentController?.dispose()
+  componentController = null
+
+  if (carModel) {
+    scene.remove(carModel)
+    modelManager.dispose(carModel)
+    carModel = null
+  }
+
+  selectedComponentId.value = null
+  selectedPart.value = null
+  hiddenComponentIds.value = []
+  isolatedComponentId.value = null
+  explosionAmount.value = 0
 }
 
 
@@ -165,30 +169,20 @@ onBeforeUnmount(() => {
 
   controls.removeEventListener(
     'start',
-    stopCameraAnimation
+    onControlsStart
   )
 
   clearSelection()
 
-  if (carModel) {
-    scene.remove(carModel)
-
-    componentController?.dispose()
-    componentController = null
-
-    modelManager.dispose(carModel)
-    carModel = null
-  }
-
-  originalPositions.clear()
-  explosionDirections.clear()
-  componentLabels.clear()
-
+  cameraController?.dispose()
+  cameraController = null
+  
   engine.dispose()
 })
 
 
-async function loadCarModel() {
+
+async function loadCarModel(): Promise<void> {
   try {
     const model = await modelManager.load(props.model)
 
@@ -197,32 +191,48 @@ async function loadCarModel() {
       return
     }
 
+    // Release an existing model before installing a new one.
+    disposeLoadedModel()
+
     carModel = model
 
-    // Register selectable meshes.
+    scene.add(carModel)
+
     componentController = new ComponentController(
       carModel,
       props.model.components
     )
 
-    scene.add(carModel)
+    labelController = new LabelController(
+      props.model.components,
+      componentController,
+      showLabels.value
+    )
 
-    initializeComponentLabels()
-    initializeExplodedView()
+    if (props.model.explodedView) {
+      explodedViewController = new ExplodedViewController(
+        carModel,
+        props.model.explodedView
+      )
+    }
 
     modelManager.frameModel(carModel, camera, controls)
 
     console.log(
       `${props.model.name} loaded successfully!`
     )
-
   } catch (error) {
     console.error(
       `Failed to load ${props.model.name}:`,
       error
     )
+
+    if (!isDisposed) {
+      disposeLoadedModel()
+    }
   }
 }
+
 
 function getComponentName(mesh: THREE.Mesh): string {
   let current: THREE.Object3D | null = mesh
@@ -294,7 +304,7 @@ function setComponentVisibility(
     }
   }
 
-  updateComponentLabels()
+  labelController?.updateVisibility()
 }
 
 
@@ -316,13 +326,13 @@ function isolateComponent(component: AutomotiveComponent) {
   selectedPart.value = component.name
   isolatedComponentId.value = component.id
 
-  updateComponentLabels()
+  labelController?.updateVisibility()
 }
 
 function exitIsolation() {
   componentController?.exitIsolation()
   isolatedComponentId.value = null
-  updateComponentLabels()
+  labelController?.updateVisibility()
 }
 
 function isolateSelectedComponent() {
@@ -337,169 +347,28 @@ function isolateSelectedComponent() {
 
 
 function focusOnComponent(component: AutomotiveComponent) {
-  if (!carModel) return
+  if (!cameraController || !carModel) return
 
   const meshes = findComponentMeshes(component)
 
-  if (meshes.length === 0) {
+  if (!cameraController.focusOnObjects(meshes)) {
     console.warn(`Cannot focus on ${component.name}`)
-    return
   }
-
-  // Calculate the bounding box of all component meshes.
-  const bounds = new THREE.Box3()
-
-  for (const mesh of meshes) {
-    mesh.updateWorldMatrix(true, false)
-
-    const meshBounds = new THREE.Box3().setFromObject(mesh)
-    bounds.union(meshBounds)
-  }
-
-  if (bounds.isEmpty()) return
-
-  const center = bounds.getCenter(new THREE.Vector3())
-  const size = bounds.getSize(new THREE.Vector3())
-
-  const maxDimension = Math.max(size.x, size.y, size.z)
-
-  // Calculate a suitable camera distance.
-  const verticalFov = THREE.MathUtils.degToRad(camera.fov)
-  const horizontalFov = 2 * Math.atan(
-    Math.tan(verticalFov / 2) * camera.aspect
-  )
-
-  const limitingFov = Math.min(verticalFov, horizontalFov)
-
-  const distance = Math.max(
-    (maxDimension / 2) / Math.tan(limitingFov / 2) * 1.8,
-    0.2
-  )
-
-  // Preserve the current viewing direction.
-  const direction = camera.position
-    .clone()
-    .sub(controls.target)
-    .normalize()
-
-  if (direction.lengthSq() < 0.0001) {
-    direction.set(1, 0.5, 1).normalize()
-  }
-
-  focusTarget.copy(center)
-
-  focusCameraPosition
-    .copy(center)
-    .addScaledVector(direction, distance)
-
-  isCameraAnimating = true
 }
 
 function focusSelectedComponent() {
   const component = props.model.components.find(
-  c => c.id === selectedComponentId.value
-)
+    c => c.id === selectedComponentId.value
+  )
 
   if (component) {
     focusOnComponent(component)
   }
 }
 
-
-function initializeExplodedView() {
-  originalPositions.clear()
-  explosionDirections.clear()
-  explosionAmount.value = 0
-
-  if (!carModel || !props.model.explodedView) return
-
-  for (const part of props.model.explodedView.parts) {
-    const object = carModel.getObjectByName(part.meshName)
-
-    if (!object) {
-      console.warn(`Exploded-view object not found: ${part.meshName}`)
-      continue
-    }
-
-    originalPositions.set(object, object.position.clone())
-
-    const direction = new THREE.Vector3(...part.direction)
-      .normalize()
-      .multiplyScalar(part.distance)
-
-    explosionDirections.set(object, direction)
-  }
-}
-
-
-
-const explosionTarget = new THREE.Vector3()
-
-function updateExplodedView() {
-  for (const [object, originalPosition] of originalPositions) {
-    const direction = explosionDirections.get(object)
-    if (!direction) continue
-
-    explosionTarget
-      .copy(originalPosition)
-      .addScaledVector(direction, explosionAmount.value)
-
-    object.position.lerp(explosionTarget, 0.1)
-  }
-}
-
-
-
-function initializeComponentLabels() {
-  if (!carModel) return
-
-  componentLabels.clear()
-
-  for (const component of props.model.components) {
-    const meshes = findComponentMeshes(component)
-    if (meshes.length === 0) continue
-
-    const anchorMesh = meshes[0]!
-
-    // Calculate a bounding box in world coordinates.
-    const bounds = new THREE.Box3().setFromObject(anchorMesh)
-    const center = bounds.getCenter(new THREE.Vector3())
-    const size = bounds.getSize(new THREE.Vector3())
-
-    // Place label slightly above the component.
-    center.y += Math.max(size.y * 0.6, 0.15)
-
-    // Convert the position to the mesh's local coordinates.
-    const localPosition = anchorMesh.worldToLocal(center)
-
-    const label = createComponentLabel(component)
-    label.position.copy(localPosition)
-    label.visible = showLabels.value
-
-    anchorMesh.add(label)
-    componentLabels.set(component.id, label)
-  }
-}
-
-
-
-function updateComponentLabels() {
-  for (const component of props.model.components) {
-    const label = componentLabels.get(component.id)
-    if (!label) continue
-
-    const meshes = findComponentMeshes(component)
-
-    const hasVisibleMesh = meshes.some(mesh => mesh.visible)
-
-    label.visible = showLabels.value && hasVisibleMesh
-  }
-}
-
-
 function toggleLabels() {
   showLabels.value = !showLabels.value
-  updateComponentLabels()
+  labelController?.setVisible(showLabels.value)
 }
 
 

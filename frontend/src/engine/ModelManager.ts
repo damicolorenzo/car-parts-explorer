@@ -7,21 +7,24 @@ import type { ViewerModelConfig } from '../types/viewer'
 export class ModelManager {
   private readonly loader = new GLTFLoader()
 
-  async load(config: ViewerModelConfig): Promise<THREE.Group> {
-    let model: THREE.Group
+  
+async load(config: ViewerModelConfig): Promise<THREE.Group> {
+  let model: THREE.Group | null = null
 
+  try {
     if (config.modelType === 'procedural') {
       model = createProceduralModel(config.id)
     } else {
       if (!config.modelPath) {
-        throw new Error(`Missing model path for ${config.id}`)
+        throw new Error(
+          `Missing model path for ${config.id}`
+        )
       }
 
       const gltf = await this.loader.loadAsync(config.modelPath)
       model = gltf.scene
     }
 
-    // Center the model around the world origin.
     const bounds = new THREE.Box3().setFromObject(model)
 
     if (!bounds.isEmpty()) {
@@ -30,7 +33,15 @@ export class ModelManager {
     }
 
     return model
+  } catch (error) {
+    if (model) {
+      this.dispose(model)
+    }
+
+    throw error
   }
+}
+
 
   frameModel(
     model: THREE.Group,
@@ -58,11 +69,11 @@ export class ModelManager {
       0.5
     )
 
-    camera.position.set(
-      center.x + distance,
-      center.y + distance * 0.6,
-      center.z + distance
-    )
+    const direction = new THREE.Vector3(1, 0.6, 1).normalize()
+
+camera.position
+  .copy(center)
+  .addScaledVector(direction, distance)
 
     camera.near = Math.max(distance / 1000, 0.01)
     camera.far = distance * 20
@@ -72,33 +83,68 @@ export class ModelManager {
     controls.update()
   }
 
-  dispose(model: THREE.Object3D): void {
-    const geometries = new Set<THREE.BufferGeometry>()
-    const materials = new Set<THREE.Material>()
-    const textures = new Set<THREE.Texture>()
+  
+dispose(model: THREE.Object3D): void {
+  const geometries = new Set<THREE.BufferGeometry>()
+  const materials = new Set<THREE.Material>()
+  const textures = new Set<THREE.Texture>()
 
-    model.traverse(object => {
-      if (!(object instanceof THREE.Mesh)) return
+  const collectTextures = (
+    value: unknown,
+    visited = new WeakSet<object>()
+  ): void => {
+    if (value === null || typeof value !== 'object') return
 
-      geometries.add(object.geometry)
+    if (value instanceof THREE.Texture) {
+      textures.add(value)
+      return
+    }
 
-      const meshMaterials = Array.isArray(object.material)
-        ? object.material
-        : [object.material]
+    if (visited.has(value)) return
+    visited.add(value)
 
-      for (const material of meshMaterials) {
-        materials.add(material)
-
-        for (const value of Object.values(material)) {
-          if (value instanceof THREE.Texture) {
-            textures.add(value)
-          }
-        }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        collectTextures(item, visited)
       }
-    })
+      return
+    }
 
-    geometries.forEach(geometry => geometry.dispose())
-    materials.forEach(material => material.dispose())
-    textures.forEach(texture => texture.dispose())
+    if (value instanceof THREE.Object3D) return
+
+    for (const nested of Object.values(value)) {
+      collectTextures(nested, visited)
+    }
   }
+
+  model.traverse(object => {
+    if (!(object instanceof THREE.Mesh)) return
+
+    geometries.add(object.geometry)
+
+    const meshMaterials = Array.isArray(object.material)
+      ? object.material
+      : [object.material]
+
+    for (const material of meshMaterials) {
+      materials.add(material)
+    }
+  })
+
+  for (const material of materials) {
+    collectTextures(material)
+  }
+
+  for (const geometry of geometries) {
+    geometry.dispose()
+  }
+
+  for (const material of materials) {
+    material.dispose()
+  }
+
+  for (const texture of textures) {
+    texture.dispose()
+  }
+}
 }
