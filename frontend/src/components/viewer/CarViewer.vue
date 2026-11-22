@@ -13,6 +13,8 @@ import { ComponentController } from '../../engine/ComponentController'
 import { CameraController } from '../../engine/CameraController'
 import { ExplodedViewController } from '../../engine/ExplodedViewController'
 import { LabelController } from '../../engine/LabelController'
+import ComponentDetailsPanel from './ComponentDetailsPanel.vue'
+import { useComponentDetails } from '../../composables/useComponentDetails'
 
 const props = defineProps<{
   model: ViewerModelConfig
@@ -58,10 +60,20 @@ let explodedViewController: ExplodedViewController | null = null
 
 let labelController: LabelController | null = null
 
+const {
+  component: apiComponent,
+  loading: apiLoading,
+  error: apiError,
+  loadComponent,
+  clearComponent,
+} = useComponentDetails()
+
 function clearSelection() {
   componentController?.clearSelection()
   selectedComponentId.value = null
   selectedPart.value = null
+
+  clearComponent()
 }
 
 function onPointerClick(event: MouseEvent) {
@@ -93,6 +105,8 @@ const component = componentController?.selectMesh(mesh) ?? null
 
 selectedComponentId.value = component?.id ?? null
 selectedPart.value = component?.name ?? getComponentName(mesh)
+
+loadMeshDetails(mesh)
 
 }
 
@@ -281,6 +295,14 @@ function selectComponent(component: AutomotiveComponent) {
 
   selectedComponentId.value = component.id
   selectedPart.value = component.name
+
+  const meshes = findComponentMeshes(component)
+
+  if (meshes.length > 0) {
+    loadMeshDetails(meshes[0])
+  } else {
+    clearComponent()
+  }
 }
 
 
@@ -325,6 +347,14 @@ function isolateComponent(component: AutomotiveComponent) {
   selectedComponentId.value = component.id
   selectedPart.value = component.name
   isolatedComponentId.value = component.id
+
+  const meshes = findComponentMeshes(component)
+
+  if (meshes.length > 0) {
+    loadMeshDetails(meshes[0])
+  } else {
+    clearComponent()
+  }
 
   labelController?.updateVisibility()
 }
@@ -371,6 +401,37 @@ function toggleLabels() {
   labelController?.setVisible(showLabels.value)
 }
 
+function resolveViewerModelId(
+  object: THREE.Object3D
+): string | null {
+  let current: THREE.Object3D | null = object
+
+  while (current) {
+    if (
+      current.name === 'brake-assembly' ||
+      current.name === 'suspension-assembly'
+    ) {
+      return current.name
+    }
+
+    if (current === carModel) break
+
+    current = current.parent
+  }
+
+  return null
+}
+
+function loadMeshDetails(mesh: THREE.Mesh): void {
+  const viewerModelId = resolveViewerModelId(mesh)
+
+  if (!viewerModelId || !mesh.name) {
+    clearComponent()
+    return
+  }
+
+  void loadComponent(viewerModelId, mesh.name)
+}
 
 </script>
 
@@ -403,6 +464,12 @@ function toggleLabels() {
 />
 
 <ComponentInfoPanel :component="selectedComponent" />
+
+<ComponentDetailsPanel
+  :component="apiComponent"
+  :loading="apiLoading"
+  :error="apiError"
+/>
 
 <div class="isolation-controls">
   <button
