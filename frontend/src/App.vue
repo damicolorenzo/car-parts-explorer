@@ -3,6 +3,7 @@
 import { computed, ref } from 'vue'
 import CarViewer from './components/viewer/CarViewer.vue'
 import { viewerModels } from './data/models'
+import VehicleSelector from './components/explorer/VehicleSelector.vue'
 
 const activeModelId = ref(viewerModels[0]!.id)
 
@@ -26,6 +27,8 @@ const activeModel = computed(() =>
         </option>
       </select>
     </header>
+
+    <VehicleSelector />
 
     <CarViewer
       v-if="activeModel"

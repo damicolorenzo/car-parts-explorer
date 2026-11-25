@@ -15,6 +15,9 @@ import { ExplodedViewController } from '../../engine/ExplodedViewController'
 import { LabelController } from '../../engine/LabelController'
 import ComponentDetailsPanel from './ComponentDetailsPanel.vue'
 import { useComponentDetails } from '../../composables/useComponentDetails'
+import ReplacementPartsPanel from './ReplacementPartsPanel.vue'
+import { useReplacementParts } from '../../composables/useReplacementParts'
+import { useVehicleStore } from '../../stores/useVehicleStore'
 
 const props = defineProps<{
   model: ViewerModelConfig
@@ -67,6 +70,31 @@ const {
   loadComponent,
   clearComponent,
 } = useComponentDetails()
+
+const {
+  selectedVariantId,
+  hasSelectedVehicle,
+} = useVehicleStore()
+
+const selectedCatalogComponentId = computed<string | null>(
+  () => {
+    if (apiLoading.value || apiError.value) {
+      return null
+    }
+
+    return apiComponent.value?.id ?? null
+  },
+)
+
+const {
+  parts: replacementParts,
+  loading: replacementPartsLoading,
+  error: replacementPartsError,
+  refresh: refreshReplacementParts,
+} = useReplacementParts(
+  selectedCatalogComponentId,
+  selectedVariantId,
+)
 
 function clearSelection() {
   componentController?.clearSelection()
@@ -464,13 +492,22 @@ function loadMeshDetails(mesh: THREE.Mesh): void {
 />
 
 <ComponentInfoPanel :component="selectedComponent" />
-
+<div class="catalog-details">
 <ComponentDetailsPanel
   :component="apiComponent"
   :loading="apiLoading"
   :error="apiError"
 />
 
+<ReplacementPartsPanel
+  :parts="replacementParts"
+  :loading="replacementPartsLoading"
+  :error="replacementPartsError"
+  :has-selected-component="selectedCatalogComponentId !== null"
+  :has-selected-vehicle="hasSelectedVehicle"
+  @retry="refreshReplacementParts"
+/>
+</div>
 <div class="isolation-controls">
   <button
     v-if="isolatedComponentId"
@@ -648,6 +685,13 @@ function loadMeshDetails(mesh: THREE.Mesh): void {
 
 .label-controls button:hover {
   background: #475569;
+}
+
+.catalog-details {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
 }
 
 </style>
