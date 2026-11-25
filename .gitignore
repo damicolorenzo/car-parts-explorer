@@ -9,3 +9,6 @@ dist/
 .vscode/
 .idea/
 EOF
+.env
+.env.*
+!.env.example
