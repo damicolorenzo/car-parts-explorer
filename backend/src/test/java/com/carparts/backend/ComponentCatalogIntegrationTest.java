@@ -35,18 +35,17 @@ class ComponentCatalogIntegrationTest {
     private MockMvc mockMvc;
 
     @Test
-    void shouldReturnTwoAssemblies() throws Exception {
-        mockMvc.perform(get("/api/v1/assemblies"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(2)))
-                .andExpect(jsonPath(
-                        "$[*].code",
-                        containsInAnyOrder(
-                                "BRAKE_SYSTEM",
-                                "FRONT_SUSPENSION"
-                        )
-                ));
-    }
+void shouldReturnAllSeededAssemblies() throws Exception {
+    mockMvc.perform(get("/api/v1/assemblies"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$", hasSize(4)))
+        .andExpect(jsonPath("$[*].code", containsInAnyOrder(
+            "BRAKE_SYSTEM",
+            "FRONT_SUSPENSION",
+            "BODY",
+            "GLASS"
+        )));
+}
 
     @Test
     void shouldResolveBrakeDisc() throws Exception {
